@@ -67,7 +67,7 @@ export fn init() void {
 
     // an empty dynamic vertex buffer for the instancing data, goes in vertex buffer slot 1
     state.bind.vertex_buffers[1] = sg.makeBuffer(.{
-        .usage = .{ .stream_update = true },
+        .usage = .{ .write_transient = true },
         .size = max_particles * @sizeOf(vec3),
     });
 
@@ -125,7 +125,11 @@ export fn frame() void {
     }
 
     // update instance data
-    sg.updateBuffer(state.bind.vertex_buffers[1], sg.asRange(state.pos[0..state.cur_num_particles]));
+    sg.writeBufferTransient(.{
+        .dst = .{ .buffer = state.bind.vertex_buffers[1] },
+        .src = .{ .data = sg.asRange(&state.pos) },
+        .size = state.cur_num_particles * @sizeOf(vec3),
+    });
 
     // compute vertex shader parameters (the mvp matrix)
     state.ry += 1.0;
