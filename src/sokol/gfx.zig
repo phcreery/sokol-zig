@@ -3264,24 +3264,26 @@ pub const Bindings = extern struct {
 /// .immutable (default: true)
 ///     the buffer content will never be updated from the CPU side while
 ///     in 'valid' resource state (but may be written to by a compute shader)
-/// .dynamic_update (default: false)
-///     the buffer content will be infrequently updated from the CPU side
-/// .stream_update (default: false)
-///     the buffer content will be updated each frame from the CPU side
 /// .write_unsealed (default: false)
 ///     when true, creates an immutable buffer in 'unsealed' resource state,
 ///     unsealed buffers can be populated with data by one or multiple
 ///     `sg_write_buffer_unsealed()` calls before being 'sealed' by
 ///     calling `sg_seal_buffer()` which transitions from 'unsealed'
 ///     to 'valid' resource state
+/// .write_transient (default: false)
+///     TODO: docs
+/// .dynamic_update (default: false)
+///     the buffer content will be infrequently updated from the CPU side
+/// .stream_update (deprecated, default: false)
+///     the buffer content will be updated each frame from the CPU side
 pub const BufferUsage = extern struct {
     vertex_buffer: bool = false,
     index_buffer: bool = false,
     storage_buffer: bool = false,
     immutable: bool = false,
-    dynamic_update: bool = false,
-    stream_update: bool = false,
     write_unsealed: bool = false,
+    write_transient: bool = false,
+    dynamic_update: bool = false,
 };
 
 /// sg_buffer_desc
@@ -3374,16 +3376,16 @@ pub const BufferDesc = extern struct {
 /// .immutable (default: true)
 ///     the image content cannot be updated from the CPU side
 ///     (but may be updated by the GPU in a render- or compute-pass)
-/// .dynamic_update (default: false)
-///     the image content is updated infrequently by the CPU via sg_update_image()
-/// .stream_update (default: false)
-///     the image content is updated each frame by the CPU via sg_update_image()
 /// .write_unsealed (default: false)
 ///     when true, creates an immutable image in 'unsealed' resource state,
 ///     unsealed images can be populated with data by one or multiple
 ///     `sg_write_image_unsealed()` calls before being 'sealed' by
 ///     calling `sg_seal_image()` which transitions from 'unsealed'
 ///     to 'valid' resource state
+/// .write_transient (default: false)
+///     TODO: docs
+/// .dynamic_update (default: false)
+///     the image content is updated infrequently by the CPU via sg_update_image()
 ///
 /// Note that creating a texture view from the image to be used for
 /// texture-sampling in vertex-, fragment- or compute-shaders
@@ -3394,9 +3396,9 @@ pub const ImageUsage = extern struct {
     resolve_attachment: bool = false,
     depth_stencil_attachment: bool = false,
     immutable: bool = false,
-    dynamic_update: bool = false,
-    stream_update: bool = false,
     write_unsealed: bool = false,
+    write_transient: bool = false,
+    dynamic_update: bool = false,
 };
 
 /// sg_view_type
@@ -4219,6 +4221,8 @@ pub const TraceHooks = extern struct {
     update_buffer: ?*const fn (Buffer, [*c]const Range, ?*anyopaque) callconv(.c) void = null,
     update_image: ?*const fn (Image, [*c]const ImageData, ?*anyopaque) callconv(.c) void = null,
     append_buffer: ?*const fn (Buffer, [*c]const Range, i32, ?*anyopaque) callconv(.c) void = null,
+    write_buffer_transient: ?*const fn ([*c]const WriteBufferDesc, ?*anyopaque) callconv(.c) void = null,
+    write_image_transient: ?*const fn ([*c]const WriteImageDesc, ?*anyopaque) callconv(.c) void = null,
     write_buffer_unsealed: ?*const fn ([*c]const WriteBufferDesc, ?*anyopaque) callconv(.c) void = null,
     write_image_unsealed: ?*const fn ([*c]const WriteImageDesc, ?*anyopaque) callconv(.c) void = null,
     seal_buffer: ?*const fn (Buffer, ?*anyopaque) callconv(.c) void = null,
@@ -4533,6 +4537,8 @@ pub const FrameStats = extern struct {
     num_update_buffer: u32 = 0,
     num_append_buffer: u32 = 0,
     num_update_image: u32 = 0,
+    num_write_buffer_transient: u32 = 0,
+    num_write_image_transient: u32 = 0,
     num_write_buffer_unsealed: u32 = 0,
     num_write_image_unsealed: u32 = 0,
     num_seal_buffer: u32 = 0,
@@ -4613,6 +4619,7 @@ pub const LogItem = enum(i32) {
     D3D11_MAP_FOR_UPDATE_BUFFER_FAILED,
     D3D11_MAP_FOR_APPEND_BUFFER_FAILED,
     D3D11_MAP_FOR_UPDATE_IMAGE_FAILED,
+    D3D11_MAP_FOR_WRITE_BUFFER_TRANSIENT_FAILED,
     METAL_CREATE_BUFFER_FAILED,
     METAL_TEXTURE_FORMAT_NOT_SUPPORTED,
     METAL_CREATE_TEXTURE_FAILED,
@@ -4723,6 +4730,8 @@ pub const LogItem = enum(i32) {
     BEGINPASS_TOO_MANY_RESOLVE_ATTACHMENTS,
     BEGINPASS_ATTACHMENTS_ALIVE,
     DRAW_WITHOUT_BINDINGS,
+    WRITE_BUFFER_TRANSIENT_BUFFER_ALIVE,
+    WRITE_IMAGE_TRANSIENT_IMAGE_ALIVE,
     WRITE_BUFFER_UNSEALED_BUFFER_ALIVE,
     WRITE_IMAGE_UNSEALED_IMAGE_ALIVE,
     SEAL_BUFFER_ALIVE,
@@ -4740,7 +4749,7 @@ pub const LogItem = enum(i32) {
     SHADERDESC_TOO_MANY_FRAGMENTSTAGE_TEXTURESAMPLERPAIRS,
     SHADERDESC_TOO_MANY_COMPUTESTAGE_TEXTURESAMPLERPAIRS,
     VALIDATE_BUFFERDESC_CANARY,
-    VALIDATE_BUFFERDESC_IMMUTABLE_DYNAMIC_STREAM,
+    VALIDATE_BUFFERDESC_IMMUTABLE_VS_WRITABLE,
     VALIDATE_BUFFERDESC_UNSEALED_VS_IMMUTABLE,
     VALIDATE_BUFFERDESC_SEPARATE_BUFFER_TYPES,
     VALIDATE_BUFFERDESC_EXPECT_NONZERO_SIZE,
@@ -4753,7 +4762,7 @@ pub const LogItem = enum(i32) {
     VALIDATE_IMAGEDATA_NODATA,
     VALIDATE_IMAGEDATA_DATA_SIZE,
     VALIDATE_IMAGEDESC_CANARY,
-    VALIDATE_IMAGEDESC_IMMUTABLE_DYNAMIC_STREAM,
+    VALIDATE_IMAGEDESC_IMMUTABLE_VS_WRITABLE,
     VALIDATE_IMAGEDESC_UNSEALED_VS_IMMUTABLE,
     VALIDATE_IMAGEDESC_UNSEALED_VS_ATTACHMENT,
     VALIDATE_IMAGEDESC_ATTACHMENT_COLOR_DEPTH_STENCIL,
@@ -4781,8 +4790,7 @@ pub const LogItem = enum(i32) {
     VALIDATE_IMAGEDESC_STORAGEIMAGE_PIXELFORMAT,
     VALIDATE_IMAGEDESC_STORAGEIMAGE_EXPECT_NO_MSAA,
     VALIDATE_IMAGEDESC_INJECTED_NO_DATA,
-    VALIDATE_IMAGEDESC_UNSEALED_NO_DATA,
-    VALIDATE_IMAGEDESC_DYNAMIC_NO_DATA,
+    VALIDATE_IMAGEDESC_WRITABLE_NO_DATA,
     VALIDATE_IMAGEDESC_COMPRESSED_IMMUTABLE,
     VALIDATE_SAMPLERDESC_CANARY,
     VALIDATE_SAMPLERDESC_ANISTROPIC_REQUIRES_LINEAR_FILTERING,
@@ -4988,11 +4996,13 @@ pub const LogItem = enum(i32) {
     VALIDATE_ABND_VBUF_ALIVE,
     VALIDATE_ABND_VBUF_USAGE,
     VALIDATE_ABND_VBUF_OVERFLOW,
+    VALIDATE_ABND_VBUF_WRITE_TRANSIENT,
     VALIDATE_ABND_EXPECTED_NO_IBUF,
     VALIDATE_ABND_EXPECTED_IBUF,
     VALIDATE_ABND_IBUF_ALIVE,
     VALIDATE_ABND_IBUF_USAGE,
     VALIDATE_ABND_IBUF_OVERFLOW,
+    VALIDATE_ABND_IBUF_WRITE_TRANSIENT,
     VALIDATE_ABND_EXPECTED_VIEW_BINDING,
     VALIDATE_ABND_VIEW_ALIVE,
     VALIDATE_ABND_EXPECT_TEXVIEW,
@@ -5003,10 +5013,13 @@ pub const LogItem = enum(i32) {
     VALIDATE_ABND_TEXVIEW_EXPECTED_NON_MULTISAMPLED_IMAGE,
     VALIDATE_ABND_TEXVIEW_EXPECTED_FILTERABLE_IMAGE,
     VALIDATE_ABND_TEXVIEW_EXPECTED_DEPTH_IMAGE,
+    VALIDATE_ABND_TEXVIEW_IMAGE_WRITE_TRANSIENT,
     VALIDATE_ABND_SBVIEW_READWRITE_IMMUTABLE,
+    VALIDATE_ABND_SBVIEW_BUFFER_WRITE_TRANSIENT,
     VALIDATE_ABND_SIMGVIEW_COMPUTE_PASS_EXPECTED,
     VALIDATE_ABND_SIMGVIEW_IMAGETYPE_MISMATCH,
     VALIDATE_ABND_SIMGVIEW_ACCESSFORMAT,
+    VALIDATE_ABND_SIMGVIEW_IMAGE_WRITE_TRANSIENT,
     VALIDATE_ABND_EXPECTED_SAMPLER_BINDING,
     VALIDATE_ABND_UNEXPECTED_SAMPLER_COMPARE_NEVER,
     VALIDATE_ABND_EXPECTED_SAMPLER_COMPARE_NEVER,
@@ -5055,28 +5068,33 @@ pub const LogItem = enum(i32) {
     VALIDATE_UPDIMG_ONCE,
     VALIDATE_WRITEBUFFERUNSEALED_USAGE,
     VALIDATE_WRITEBUFFERUNSEALED_RESOURCESTATE,
-    VALIDATE_WRITEBUFFERUNSEALED_SRC_DATA_POINTER,
-    VALIDATE_WRITEBUFFERUNSEALED_SRC_DATA_SIZE,
-    VALIDATE_WRITEBUFFERUNSEALED_SIZE,
-    VALIDATE_WRITEBUFFERUNSEALED_WRITE_OVERFLOW,
-    VALIDATE_WRITEBUFFERUNSEALED_READ_OVERFLOW,
+    VALIDATE_WRITEBUFFERTRANSIENT_USAGE,
+    VALIDATE_WRITEBUFFERTRANSIENT_WRITE_BEFORE_BIND,
+    VALIDATE_WRITEBUFFERTRANSIENT_DST_OFFSET_ALIGNMENT,
+    VALIDATE_WRITEBUFFER_SRC_DATA_POINTER,
+    VALIDATE_WRITEBUFFER_SRC_DATA_SIZE,
+    VALIDATE_WRITEBUFFER_SIZE,
+    VALIDATE_WRITEBUFFER_WRITE_OVERFLOW,
+    VALIDATE_WRITEBUFFER_READ_OVERFLOW,
     VALIDATE_WRITEIMAGEUNSEALED_USAGE,
     VALIDATE_WRITEIMAGEUNSEALED_RESOURCESTATE,
-    VALIDATE_WRITEIMAGEUNSEALED_SRC_DATA_POINTER,
-    VALIDATE_WRITEIMAGEUNSEALED_SRC_DATA_SIZE,
-    VALIDATE_WRITEIMAGEUNSEALED_BYTESPERROW,
-    VALIDATE_WRITEIMAGEUNSEALED_BYTESPERSLICE,
-    VALIDATE_WRITEIMAGEUNSEALED_MIPLEVEL,
-    VALIDATE_WRITEIMAGEUNSEALED_WIDTH,
-    VALIDATE_WRITEIMAGEUNSEALED_HEIGHT,
-    VALIDATE_WRITEIMAGEUNSEALED_NUMSLICES,
-    VALIDATE_WRITEIMAGEUNSEALED_READ_OVERFLOW,
-    VALIDATE_WRITEIMAGEUNSEALED_DST_X_RANGE,
-    VALIDATE_WRITEIMAGEUNSEALED_DST_Y_RANGE,
-    VALIDATE_WRITEIMAGEUNSEALED_DST_SLICE_RANGE,
-    VALIDATE_WRITEIMAGEUNSEALED_WRITE_WIDTH_OVERFLOW,
-    VALIDATE_WRITEIMAGEUNSEALED_WRITE_HEIGHT_OVERFLOW,
-    VALIDATE_WRITEIMAGEUNSEALED_WRITE_NUMSLICES_OVERFLOW,
+    VALIDATE_WRITEIMAGETRANSIENT_USAGE,
+    VALIDATE_WRITEIMAGETRANSIENT_WRITE_BEFORE_BIND,
+    VALIDATE_WRITEIMAGE_SRC_DATA_POINTER,
+    VALIDATE_WRITEIMAGE_SRC_DATA_SIZE,
+    VALIDATE_WRITEIMAGE_BYTESPERROW,
+    VALIDATE_WRITEIMAGE_BYTESPERSLICE,
+    VALIDATE_WRITEIMAGE_MIPLEVEL,
+    VALIDATE_WRITEIMAGE_WIDTH,
+    VALIDATE_WRITEIMAGE_HEIGHT,
+    VALIDATE_WRITEIMAGE_NUMSLICES,
+    VALIDATE_WRITEIMAGE_READ_OVERFLOW,
+    VALIDATE_WRITEIMAGE_DST_X_RANGE,
+    VALIDATE_WRITEIMAGE_DST_Y_RANGE,
+    VALIDATE_WRITEIMAGE_DST_SLICE_RANGE,
+    VALIDATE_WRITEIMAGE_WRITE_WIDTH_OVERFLOW,
+    VALIDATE_WRITEIMAGE_WRITE_HEIGHT_OVERFLOW,
+    VALIDATE_WRITEIMAGE_WRITE_NUMSLICES_OVERFLOW,
     VALIDATE_SEALBUFFER_RESOURCESTATE,
     VALIDATE_SEALIMAGE_RESOURCESTATE,
     VALIDATION_FAILED,
@@ -5522,9 +5540,21 @@ pub fn commit() void {
 }
 
 /// resource update functions (wip new resource update api)
-extern fn sg_write_buffer_unsealed([*c]const WriteBufferDesc) void;
+extern fn sg_write_buffer_transient([*c]const WriteBufferDesc) void;
 
 /// resource update functions (wip new resource update api)
+pub fn writeBufferTransient(desc: WriteBufferDesc) void {
+    sg_write_buffer_transient(&desc);
+}
+
+extern fn sg_write_image_transient([*c]const WriteImageDesc) void;
+
+pub fn writeImageTransient(desc: WriteImageDesc) void {
+    sg_write_image_transient(&desc);
+}
+
+extern fn sg_write_buffer_unsealed([*c]const WriteBufferDesc) void;
+
 pub fn writeBufferUnsealed(desc: WriteBufferDesc) void {
     sg_write_buffer_unsealed(&desc);
 }
