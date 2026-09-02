@@ -71,6 +71,7 @@ pub fn build(b: *Build) !void {
     const opt_use_x11 = b.option(bool, "x11", "Force X11 (default: true, Linux only)") orelse true;
     const opt_use_wayland = b.option(bool, "wayland", "Force Wayland (default: false, Linux only, not supported in main-line headers)") orelse false;
     const opt_use_egl = b.option(bool, "egl", "Force EGL (default: false, Linux only)") orelse false;
+    const opt_use_wgpu_native = b.option(bool, "wgpu_native", "Use wgpu-native instead of Dawn for the WebGPU backend (default: false, native only)") orelse false;
     const opt_with_sokol_imgui = b.option(bool, "with_sokol_imgui", "Add support for sokol_imgui.h bindings") orelse false;
     const opt_with_tracing = b.option(bool, "with_tracing", "Add support for sokol_gfx tracing and debug UI") orelse false;
     const opt_dont_link_system_libs = b.option(bool, "dont_link_system_libs", "Do not link system libraries required by sokol (default: false)") orelse false;
@@ -93,6 +94,7 @@ pub fn build(b: *Build) !void {
         .target = target,
         .optimize = optimize,
         .backend = sokol_backend,
+        .use_wgpu_native = opt_use_wgpu_native,
         .dynamic_linkage = opt_dynamic_linkage,
         .use_wayland = opt_use_wayland,
         .use_x11 = opt_use_x11,
@@ -138,6 +140,7 @@ pub const LibSokolOptions = struct {
     target: Build.ResolvedTarget,
     optimize: OptimizeMode,
     backend: SokolBackend = .auto,
+    use_wgpu_native: bool = false,
     use_egl: bool = false,
     use_x11: bool = true,
     dynamic_linkage: bool = false,
@@ -217,7 +220,12 @@ pub fn buildLibSokol(b: *Build, options: LibSokolOptions) !*Build.Step.Compile {
         .metal => try cflags.appendBounded("-DSOKOL_METAL"),
         .gl => try cflags.appendBounded("-DSOKOL_GLCORE"),
         .gles3 => try cflags.appendBounded("-DSOKOL_GLES3"),
-        .wgpu => try cflags.appendBounded("-DSOKOL_WGPU"),
+        .wgpu => {
+            try cflags.appendBounded("-DSOKOL_WGPU");
+            if (options.use_wgpu_native and !mod_target.cpu.arch.isWasm()) {
+                try cflags.appendBounded("-DSOKOL_WGPU_NATIVE");
+            }
+        },
         .vulkan => try cflags.appendBounded("-DSOKOL_VULKAN"),
         else => @panic("unknown sokol backend"),
     }

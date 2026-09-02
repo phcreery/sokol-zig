@@ -2450,6 +2450,10 @@ inline void sapp_run(const sapp_desc& desc) { return sapp_run(&desc); }
 
 #if defined(SOKOL_WGPU)
     #include <webgpu/webgpu.h>
+    #if defined(SOKOL_WGPU_NATIVE) && !defined(__EMSCRIPTEN__)
+        // wgpu-native extension API (wgpuSetLogCallback etc.)
+        #include <webgpu/wgpu.h>
+    #endif
     #if !defined(__EMSCRIPTEN__)
         #define _SAPP_WGPU_HAS_WAIT (1)
     #endif
@@ -2768,6 +2772,7 @@ typedef struct {
     WGPUTextureView depth_stencil_view;
     WGPUTextureView swapchain_view;
     WGPUTextureFormat swapchain_view_format;
+    WGPUTexture swapchain_tex;
     bool init_done;
 } _sapp_wgpu_t;
 #endif
@@ -3883,7 +3888,9 @@ _SOKOL_PRIVATE WGPUStringView _sapp_wgpu_stringview(const char* str) {
 }
 
 _SOKOL_PRIVATE WGPUCallbackMode _sapp_wgpu_callbackmode(void) {
-    #if defined(_SAPP_WGPU_HAS_WAIT)
+    // NOTE: wgpu-native does not implement wgpuInstanceWaitAny, so
+    // WaitAnyOnly callbacks would never fire; pump ProcessEvents instead.
+    #if defined(_SAPP_WGPU_HAS_WAIT) && !defined(SOKOL_WGPU_NATIVE)
         return WGPUCallbackMode_WaitAnyOnly;
     #else
         return WGPUCallbackMode_AllowProcessEvents;
@@ -4111,10 +4118,17 @@ _SOKOL_PRIVATE bool _sapp_wgpu_swapchain_next(void) {
             _sapp_wgpu_discard_swapchain(false);
             _sapp_wgpu_create_swapchain(false);
             return false;
+        case WGPUSurfaceGetCurrentTextureStatus_Occluded:
+            // wgpu-native on macOS returns Occluded while the window is not
+            // yet visible; skip the frame instead of treating it as fatal.
+            return false;
         case WGPUSurfaceGetCurrentTextureStatus_Error:
         default:
+            if (surf_tex.texture) {
+                wgpuTextureRelease(surf_tex.texture);
+            }
             _SAPP_ERROR(WGPU_SWAPCHAIN_GETCURRENTTEXTURE_FAILED);
-            break;
+            return false;
     }
     if (_sapp.wgpu.surface_format == _sapp.wgpu.swapchain_view_format) {
         _sapp.wgpu.swapchain_view = wgpuTextureCreateView(surf_tex.texture, 0);
@@ -4128,7 +4142,8 @@ _SOKOL_PRIVATE bool _sapp_wgpu_swapchain_next(void) {
         _sapp.wgpu.swapchain_view = wgpuTextureCreateView(surf_tex.texture, &view_desc);
 
     }
-    wgpuTextureRelease(surf_tex.texture);
+    // NOTE: released in _sapp_wgpu_frame() after wgpuSurfacePresent
+    _sapp.wgpu.swapchain_tex = surf_tex.texture;
     SOKOL_ASSERT(_sapp.wgpu.swapchain_view);
     return true;
 }
@@ -4152,8 +4167,28 @@ _SOKOL_PRIVATE void _sapp_wgpu_device_lost_cb(const WGPUDevice* dev, WGPUDeviceL
     }
 }
 
-// NOTE: emdawnwebgpu doesn't seem to have a device logging callback
-#if !defined(_SAPP_EMSCRIPTEN)
+// NOTE: emdawnwebgpu doesn't seem to have a device logging callback,
+// and wgpu-native doesn't have the Dawn-specific wgpuDeviceSetLoggingCallback
+// (it uses the global wgpuSetLogCallback from the wgpu-native extras instead)
+#if !defined(_SAPP_EMSCRIPTEN) && defined(SOKOL_WGPU_NATIVE)
+_SOKOL_PRIVATE void _sapp_wgpu_device_logging_cb(WGPULogLevel log_level, WGPUStringView msg, void* userdata) {
+    _SOKOL_UNUSED(userdata);
+    SOKOL_ASSERT(msg.data && (msg.length > 0));
+    char buf[1024];
+    _sapp_strcpy_range(msg.data, msg.length, buf, sizeof(buf));
+    switch (log_level) {
+        case WGPULogLevel_Warn:
+            _SAPP_WARN_MSG(WGPU_DEVICE_LOG, buf);
+            break;
+        case WGPULogLevel_Error:
+            _SAPP_ERROR_MSG(WGPU_DEVICE_LOG, buf);
+            break;
+        default:
+            _SAPP_INFO_MSG(WGPU_DEVICE_LOG, buf);
+            break;
+    }
+}
+#elif !defined(_SAPP_EMSCRIPTEN)
 _SOKOL_PRIVATE void _sapp_wgpu_device_logging_cb(WGPULoggingType log_type, WGPUStringView msg, void* ud1, void* ud2) {
     _SOKOL_UNUSED(log_type); _SOKOL_UNUSED(ud1); _SOKOL_UNUSED(ud2);
     SOKOL_ASSERT(msg.data && (msg.length > 0));
@@ -4198,9 +4233,15 @@ _SOKOL_PRIVATE void _sapp_wgpu_request_device_cb(WGPURequestDeviceStatus status,
     SOKOL_ASSERT(device);
     _sapp.wgpu.device = device;
     #if !defined(_SAPP_EMSCRIPTEN)
-        _SAPP_STRUCT(WGPULoggingCallbackInfo, cb_info);
-        cb_info.callback = _sapp_wgpu_device_logging_cb;
-        wgpuDeviceSetLoggingCallback(_sapp.wgpu.device, cb_info);
+        #if defined(SOKOL_WGPU_NATIVE)
+            // NOTE: wgpu-native's log callback is global, not per-device
+            wgpuSetLogCallback(_sapp_wgpu_device_logging_cb, NULL);
+            wgpuSetLogLevel(WGPULogLevel_Info);
+        #else
+            _SAPP_STRUCT(WGPULoggingCallbackInfo, cb_info);
+            cb_info.callback = _sapp_wgpu_device_logging_cb;
+            wgpuDeviceSetLoggingCallback(_sapp.wgpu.device, cb_info);
+        #endif
     #endif
     _sapp_wgpu_create_swapchain(false);
     _sapp.wgpu.init_done = true;
@@ -4270,7 +4311,15 @@ _SOKOL_PRIVATE void _sapp_wgpu_create_device_and_swapchain(void) {
     dev_desc.uncapturedErrorCallbackInfo.callback = _sapp_wgpu_uncaptured_error_cb;
     WGPUFuture future = wgpuAdapterRequestDevice(_sapp.wgpu.adapter, &dev_desc, cb_info);
     #if defined(_SAPP_WGPU_HAS_WAIT)
-        _sapp_wgpu_await(future);
+        #if defined(SOKOL_WGPU_NATIVE)
+            // wgpu-native: spin until the request callback ran the swapchain setup
+            _SOKOL_UNUSED(future);
+            while (!_sapp.wgpu.init_done) {
+                wgpuInstanceProcessEvents(_sapp.wgpu.instance);
+            }
+        #else
+            _sapp_wgpu_await(future);
+        #endif
     #else
         _SOKOL_UNUSED(future);
     #endif
@@ -4303,7 +4352,15 @@ _SOKOL_PRIVATE void _sapp_wgpu_create_adapter(void) {
     cb_info.callback = _sapp_wgpu_request_adapter_cb;
     WGPUFuture future = wgpuInstanceRequestAdapter(_sapp.wgpu.instance, 0, cb_info);
     #if defined(_SAPP_WGPU_HAS_WAIT)
-        _sapp_wgpu_await(future);
+        #if defined(SOKOL_WGPU_NATIVE)
+            // wgpu-native: spin on the adapter set by the request callback
+            _SOKOL_UNUSED(future);
+            while (0 == _sapp.wgpu.adapter) {
+                wgpuInstanceProcessEvents(_sapp.wgpu.instance);
+            }
+        #else
+            _sapp_wgpu_await(future);
+        #endif
     #else
         _SOKOL_UNUSED(future);
     #endif
@@ -4314,7 +4371,7 @@ _SOKOL_PRIVATE void _sapp_wgpu_init(void) {
     SOKOL_ASSERT(!_sapp.wgpu.init_done);
 
     _SAPP_STRUCT(WGPUInstanceDescriptor, desc);
-    #if defined(_SAPP_WGPU_HAS_WAIT)
+    #if defined(_SAPP_WGPU_HAS_WAIT) && !defined(SOKOL_WGPU_NATIVE)
         WGPUInstanceFeatureName inst_features[1] = {
             WGPUInstanceFeatureName_TimedWaitAny,
         };
@@ -4360,6 +4417,10 @@ _SOKOL_PRIVATE void _sapp_wgpu_frame(void) {
         #if !defined(_SAPP_EMSCRIPTEN)
         wgpuSurfacePresent(_sapp.wgpu.surface);
         #endif
+        if (_sapp.wgpu.swapchain_tex) {
+            wgpuTextureRelease(_sapp.wgpu.swapchain_tex);
+            _sapp.wgpu.swapchain_tex = 0;
+        }
     }
 }
 #endif // SOKOL_WGPU
@@ -5576,8 +5637,16 @@ _SOKOL_PRIVATE void _sapp_macos_wgpu_init(void) {
     [_sapp.macos.view updateTrackingAreas];
     _sapp.macos.view.wantsLayer = YES;
     _sapp.macos.view.layer = _sapp.macos.wgpu.mtl_layer;
+    // wgpu-native rejects wgpuSurfaceConfigure() with zero width/height
+    // (ZeroArea), so seed the metal layer drawable size from the current
+    // default dimensions before _sapp_wgpu_init() creates/configures the
+    // swapchain. Works identically to the SOKOL_METAL path.
+    const CGSize seed_fb_size = { (CGFloat) _sapp.framebuffer_width, (CGFloat) _sapp.framebuffer_height };
+    if ((seed_fb_size.width > 0) && (seed_fb_size.height > 0)) {
+        _sapp.macos.wgpu.mtl_layer.drawableSize = seed_fb_size;
+    }
     _sapp.macos.wgpu.display_link = [_sapp.macos.view displayLinkWithTarget:_sapp.macos.view selector:@selector(displayLinkFired:)];
-    float preferred_fps = max_fps / _sapp.swap_interval;
+    float preferred_fps = max_fps / _sapp.desc.swap_interval;
     CAFrameRateRange frame_rate_range = { preferred_fps, preferred_fps, preferred_fps };
     _sapp.macos.wgpu.display_link.preferredFrameRateRange = frame_rate_range;
     [_sapp.macos.wgpu.display_link addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
@@ -6442,7 +6511,7 @@ _SOKOL_PRIVATE void _sapp_macos_frame(void) {
     _SOKOL_UNUSED(rect);
     _sapp_macos_frame();
 }
-#elif defined(SOKOL_METAL) || defined(SOKOL_WGPU)
+#elif defined(SOKOL_METAL)
 - (void)displayLinkFired:(id)sender {
     _SOKOL_UNUSED(sender);
     if (!_sapp_macos_mtl_is_obscured()) {
@@ -6454,6 +6523,11 @@ _SOKOL_PRIVATE void _sapp_macos_frame(void) {
     if (_sapp_macos_mtl_is_obscured()) {
         _sapp_macos_frame();
     }
+}
+#elif defined(SOKOL_WGPU)
+- (void)displayLinkFired:(id)sender {
+    _SOKOL_UNUSED(sender);
+    _sapp_macos_frame();
 }
 #endif
 
